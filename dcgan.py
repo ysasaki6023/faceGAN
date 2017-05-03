@@ -4,55 +4,22 @@ import numpy as np
 import argparse
 import cv2,math,glob,random
 
-"""
-class BatchGenerator:
-    def __init__(self):
-        #from tensorflow.examples.tutorials.mnist import input_data
-        #mnist = input_data.read_data_sets("MNIST_data/", one_hot=False)
-        self.image = mnist.train.images
-        self.label = mnist.train.labels
-
-        self.image = np.reshape(self.image, [len(self.image), 28, 28])
-
-    def getOne(self):
-        idx = np.random.randint(0,len(self.image)-1)
-        x,t = self.image[idx],self.label[idx]
-        if color:
-            x = np.expand_dims(x,axis=2)
-            x = np.tile(x,(1,3))
-        return x,t
-
-    def getBatch(self,nBatch,color=False):
-        idx = np.random.randint(0,len(self.image)-1,nBatch)
-        #t = self.image[idx],self.label[idx]
-        x   = np.zeros( (nBatch,108,108), dtype=np.float32)
-        for i in range(nBatch):
-            ii = idx[i]
-            x[i,:,:] = cv2.resize(self.image[ii],(108,108))
-        x   = np.expand_dims(x,axis=3)
-        t   = self.label[idx]
-
-        return x,t
-
-        #if color:
-        #    x = np.expand_dims(x,axis=3)
-        #    x = np.tile(x,(1,1,3))
-        #return x,t
-"""
-
 class BatchGenerator:
     def __init__(self):
         self.folderPath = "celebA"
         self.imagePath = glob.glob(self.folderPath+"/*.jpg")
-        self.orgSize = (218,173)
+        #self.orgSize = (218,173)
         self.imgSize = (108,108)
+        assert self.imgSize[0]==self.imgSize[1]
 
     def getBatch(self,nBatch):
         x   = np.zeros( (nBatch,self.imgSize[0],self.imgSize[1],3), dtype=np.float32)
         for i in range(nBatch):
             img = cv2.imread(self.imagePath[random.randint(0,len(self.imagePath)-1)])
+            dmin = min(img.shape[0],img.shape[1])
+            img = img[int(0.5*(img.shape[0]-dmin)):int(0.5*(img.shape[0]+dmin)),int(0.5*(img.shape[1]-dmin)):int(0.5*(img.shape[1]+dmin)),:]
             img = cv2.resize(img,self.imgSize)
-            x[i,:,:,:] = img
+            x[i,:,:,:] = img / 255.
 
         return x,None
 
@@ -63,6 +30,7 @@ class DCGAN:
         self.zdim = args.zdim
         self.isTraining = isTraining
         self.imageSize = imageSize
+        self.saveFolder = args.saveFolder
         self.buildModel()
 
         return
@@ -119,6 +87,9 @@ class DCGAN:
     def calcImageSize(self,dh,dw,stride):
         return int(math.ceil(float(dh)/float(stride))),int(math.ceil(float(dw)/float(stride)))
 
+    def reload(self, model_path=None):
+        if model_path: self.saver.restore(self.sess, model_path)
+
     def buildGenerator(self,z,reuse=False,isTraining=True):
         dim_0_h,dim_0_w = self.imageSize[0],self.imageSize[1]
         dim_1_h,dim_1_w = self.calcImageSize(dim_0_h, dim_0_w, stride=2)
@@ -164,6 +135,19 @@ class DCGAN:
             # sigmoid
             y = tf.tanh(h)
 
+            ### summary
+            if reuse:
+                tf.summary.histogram("g_fc1_w"   ,self.g_fc1_w)
+                tf.summary.histogram("g_fc1_b"   ,self.g_fc1_b)
+                tf.summary.histogram("g_deconv1_w"   ,self.g_deconv1_w)
+                tf.summary.histogram("g_deconv1_b"   ,self.g_deconv1_b)
+                tf.summary.histogram("g_deconv2_w"   ,self.g_deconv2_w)
+                tf.summary.histogram("g_deconv2_b"   ,self.g_deconv2_b)
+                tf.summary.histogram("g_deconv3_w"   ,self.g_deconv3_w)
+                tf.summary.histogram("g_deconv3_b"   ,self.g_deconv3_b)
+                tf.summary.histogram("g_deconv4_w"   ,self.g_deconv4_w)
+                tf.summary.histogram("g_deconv4_b"   ,self.g_deconv4_b)
+
         return y
 
     def buildDiscriminator(self,y,reuse=False):
@@ -201,7 +185,20 @@ class DCGAN:
             self.d_fc1_w, self.d_fc1_b = self._fc_variable([n_h*n_w*n_f,1],name="fc1")
             h = tf.matmul(h, self.d_fc1_w) + self.d_fc1_b
 
-        return tf.nn.sigmoid(h),h
+            ### summary
+            if not reuse:
+                tf.summary.histogram("d_fc1_w"   ,self.d_fc1_w)
+                tf.summary.histogram("d_fc1_b"   ,self.d_fc1_b)
+                tf.summary.histogram("d_conv1_w"   ,self.d_conv1_w)
+                tf.summary.histogram("d_conv1_b"   ,self.d_conv1_b)
+                tf.summary.histogram("d_conv2_w"   ,self.d_conv2_w)
+                tf.summary.histogram("d_conv2_b"   ,self.d_conv2_b)
+                tf.summary.histogram("d_conv3_w"   ,self.d_conv3_w)
+                tf.summary.histogram("d_conv3_b"   ,self.d_conv3_b)
+                tf.summary.histogram("d_conv4_w"   ,self.d_conv4_w)
+                tf.summary.histogram("d_conv4_b"   ,self.d_conv4_b)
+
+        return h
 
     def buildModel(self):
         # define variables
@@ -211,47 +208,77 @@ class DCGAN:
         self.y_fake = self.buildGenerator(self.z)
         self.y_sample = self.buildGenerator(self.z,reuse=True,isTraining=False)
 
-        self.d_real_logit,self.d_real  = self.buildDiscriminator(self.y_real)
-        self.d_fake_logit,self.d_fake  = self.buildDiscriminator(self.y_fake,reuse=True)
+        self.d_real  = self.buildDiscriminator(self.y_real)
+        self.d_fake  = self.buildDiscriminator(self.y_fake,reuse=True)
 
         # define loss
-        self.d_loss_real = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.d_real_logit,labels=tf.ones_like (self.d_real_logit)))
-        self.d_loss_fake = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.d_fake_logit,labels=tf.zeros_like(self.d_fake_logit)))
-        self.g_loss      = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.d_fake_logit,labels=tf.ones_like (self.d_fake_logit)))
-        self.d_loss = self.d_loss_real + self.d_loss_fake
+        self.d_loss_real = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.d_real,labels=tf.ones_like (self.d_real)))
+        self.d_loss_fake = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.d_fake,labels=tf.zeros_like(self.d_fake)))
+        self.g_loss      = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.d_fake,labels=tf.ones_like (self.d_fake)))
+        self.d_loss      = self.d_loss_real + self.d_loss_fake
 
         # define optimizer
         self.g_optimizer = tf.train.AdamOptimizer(self.learnRate,beta1=0.5).minimize(self.g_loss, var_list=[x for x in tf.trainable_variables() if "Generator"     in x.name])
         self.d_optimizer = tf.train.AdamOptimizer(self.learnRate,beta1=0.5).minimize(self.d_loss, var_list=[x for x in tf.trainable_variables() if "Discriminator" in x.name])
 
+        ### summary
+        tf.summary.scalar("d_loss_real"   ,self.d_loss_real)
+        tf.summary.scalar("d_loss_fake"   ,self.d_loss_fake)
+        tf.summary.scalar("d_loss"      ,self.d_loss)
+        tf.summary.scalar("g_loss"      ,self.g_loss)
+
+        #############################
+        # define session
+        config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.35))
+        self.sess = tf.Session(config=config)
+
+        #############################
+        ### saver
+        self.saver = tf.train.Saver()
+        self.summary = tf.summary.merge_all()
+        if self.saveFolder: self.writer = tf.summary.FileWriter(self.saveFolder, self.sess.graph)
+
         return
 
     def train(self,f_batch):
-        # define session
-        config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.15))
-        self.sess = tf.Session(config=config)
+
+        def tileImage(imgs):
+            d = int(math.sqrt(imgs.shape[0]-1))+1
+            h = imgs[0].shape[0]
+            w = imgs[0].shape[1]
+            r = np.zeros((h*d,w*d,3),dtype=np.float32)
+            for idx,img in enumerate(imgs):
+                idx_y = int(idx/d)
+                idx_x = idx-idx_y*d
+                r[idx_y*h:(idx_y+1)*h,idx_x*w:(idx_x+1)*w,:] = img
+            return r
+        
+        if self.saveFolder and not os.path.exists(os.path.join(self.saveFolder,"images")):
+            os.makedirs(os.path.join(self.saveFolder,"images"))
 
         initOP = tf.global_variables_initializer()
         self.sess.run(initOP)
 
-        epoch = -1
-        d_loss, g_loss = 1., 0.5
+        step = -1
         while True:
-            epoch += 1
+            step += 1
 
             batch_images,_ = f_batch(self.nBatch)
-            batch_z        = np.random.uniform(-1,+1,[self.nBatch,self.zdim]).astype(np.float32)
+            batch_z        = np.random.uniform(-1.,+1.,[self.nBatch,self.zdim]).astype(np.float32)
 
             # update generator
-            #if d_loss > g_loss:
-            _,d_loss = self.sess.run([self.d_optimizer,self.d_loss],feed_dict={self.z:batch_z, self.y_real:batch_images})
-            #else:
             _,g_loss = self.sess.run([self.g_optimizer,self.g_loss],feed_dict={self.z:batch_z})
             _,g_loss = self.sess.run([self.g_optimizer,self.g_loss],feed_dict={self.z:batch_z})
+            _,d_loss,summary = self.sess.run([self.d_optimizer,self.d_loss,self.summary],feed_dict={self.z:batch_z, self.y_real:batch_images})
 
-            if epoch%100==0:
-                print "%4d: loss(discri)=%.2e, loss(gener)=%.2e"%(epoch,d_loss,g_loss)
+
+            if step>0 and step%10==0:
+                self.writer.add_summary(summary,step)
+
+            if step%100==0:
+                print "%6d: loss(D)=%.4e, loss(G)=%.4e"%(step,d_loss,g_loss)
                 g_image = self.sess.run(self.y_sample,feed_dict={self.z:np.random.uniform(-1,+1,[self.nBatch,self.zdim]).astype(np.float32)})
-                cv2.imwrite("log/img_%d.png"%epoch,g_image[0]*255.)
-                #cv2.imwrite("log/img_%d.png"%epoch,batch_images[0]*255.)
-
+                cv2.imwrite(os.path.join(self.saveFolder,"images","img_%d.png"%step),tileImage(g_image)*255.)
+                self.saver.save(self.sess,os.path.join(self.saveFolder,"model.ckpt"),step)
+            if step==0:
+                cv2.imwrite(os.path.join(self.saveFolder,"images","org_%d.png"%step),tileImage(batch_images)*255.)
