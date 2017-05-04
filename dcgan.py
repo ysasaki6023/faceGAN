@@ -2,7 +2,7 @@ import os,path,sys,shutil
 import tensorflow as tf
 import numpy as np
 import argparse
-import cv2,math,glob,random
+import cv2,math,glob,random,time
 
 class BatchGenerator:
     def __init__(self):
@@ -19,7 +19,7 @@ class BatchGenerator:
             dmin = min(img.shape[0],img.shape[1])
             img = img[int(0.5*(img.shape[0]-dmin)):int(0.5*(img.shape[0]+dmin)),int(0.5*(img.shape[1]-dmin)):int(0.5*(img.shape[1]+dmin)),:]
             img = cv2.resize(img,self.imgSize)
-            x[i,:,:,:] = img / 255.
+            x[i,:,:,:] = (img - 128.) / 255. # normalize between -0.5 ~ +0.5 <- requirements from using tanh in the last processing in the Generator
 
         return x,None
 
@@ -31,6 +31,7 @@ class DCGAN:
         self.isTraining = isTraining
         self.imageSize = imageSize
         self.saveFolder = args.saveFolder
+        self.reload = args.reload
         self.buildModel()
 
         return
@@ -87,7 +88,7 @@ class DCGAN:
     def calcImageSize(self,dh,dw,stride):
         return int(math.ceil(float(dh)/float(stride))),int(math.ceil(float(dw)/float(stride)))
 
-    def reload(self, model_path=None):
+    def loadModel(self, model_path=None):
         if model_path: self.saver.restore(self.sess, model_path)
 
     def buildGenerator(self,z,reuse=False,isTraining=True):
@@ -259,7 +260,10 @@ class DCGAN:
         initOP = tf.global_variables_initializer()
         self.sess.run(initOP)
 
+        self.loadModel(self.reload)
+
         step = -1
+        start = time.time()
         while True:
             step += 1
 
@@ -267,18 +271,19 @@ class DCGAN:
             batch_z        = np.random.uniform(-1.,+1.,[self.nBatch,self.zdim]).astype(np.float32)
 
             # update generator
-            _,g_loss = self.sess.run([self.g_optimizer,self.g_loss],feed_dict={self.z:batch_z})
-            _,g_loss = self.sess.run([self.g_optimizer,self.g_loss],feed_dict={self.z:batch_z})
-            _,d_loss,summary = self.sess.run([self.d_optimizer,self.d_loss,self.summary],feed_dict={self.z:batch_z, self.y_real:batch_images})
-
+            _,g_loss                = self.sess.run([self.g_optimizer,self.g_loss],feed_dict={self.z:batch_z})
+            _,g_loss                = self.sess.run([self.g_optimizer,self.g_loss],feed_dict={self.z:batch_z})
+            _,d_loss,y_fake,y_real,summary = self.sess.run([self.d_optimizer,self.d_loss,self.y_fake,self.y_real,self.summary],feed_dict={self.z:batch_z, self.y_real:batch_images})
 
             if step>0 and step%10==0:
                 self.writer.add_summary(summary,step)
 
             if step%100==0:
-                print "%6d: loss(D)=%.4e, loss(G)=%.4e"%(step,d_loss,g_loss)
+                print "%6d: loss(D)=%.4e, loss(G)=%.4e; time/step = %.2f sec"%(step,d_loss,g_loss,time.time()-start)
+                start = time.time()
                 g_image = self.sess.run(self.y_sample,feed_dict={self.z:np.random.uniform(-1,+1,[self.nBatch,self.zdim]).astype(np.float32)})
-                cv2.imwrite(os.path.join(self.saveFolder,"images","img_%d.png"%step),tileImage(g_image)*255.)
+                cv2.imwrite(os.path.join(self.saveFolder,"images","img_%d_real.png"%step),tileImage(y_real)*255.+128.)
+                cv2.imwrite(os.path.join(self.saveFolder,"images","img_%d_fake.png"%step),tileImage(y_fake)*255.+128.)
                 self.saver.save(self.sess,os.path.join(self.saveFolder,"model.ckpt"),step)
             if step==0:
-                cv2.imwrite(os.path.join(self.saveFolder,"images","org_%d.png"%step),tileImage(batch_images)*255.)
+                cv2.imwrite(os.path.join(self.saveFolder,"images","org_%d.png"%step),tileImage(batch_images)*255.+128.)

@@ -15,6 +15,4 @@ if __name__=="__main__":
     batch = BatchGenerator()
     gan = DCGAN(isTraining=True,imageSize=[108,108],args=args)
 
-    gan.reload(args.reload)
-
     gan.train(f_batch=batch.getBatch)
